@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dorset Care · 养老院治疗预约系统 (Python FastAPI)</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <main class="container">
+    <header class="topbar">
+      <div>
+        <h1>Dorset Care · 养老院治疗预约系统</h1>
+        <p>
+          院方员工端 MVP（Python FastAPI + SQLite WAL + <code>BEGIN IMMEDIATE</code> 并发写锁） ·
+          <a href="/docs" target="_blank" rel="noreferrer">查看 Swagger API 文档</a>
+        </p>
+      </div>
+      <div class="stats-row">
+        <div class="stat-pill">已排期<strong id="stat-scheduled">0</strong></div>
+        <div class="stat-pill">已取消<strong id="stat-cancelled">0</strong></div>
+        <div class="stat-pill">治疗师<strong id="stat-therapists">0</strong></div>
+      </div>
+    </header>
+
+    <div class="main-grid">
+      <div class="stack">
+        <!-- 新增预约卡片 -->
+        <section class="card">
+          <div class="card-header">
+            <h2>新增治疗预约</h2>
+          </div>
+          <p class="subtitle">
+            后端自动拦截同一治疗师或同一住民的时间重叠（半开区间判断，首尾相接允许）。
+          </p>
+
+          <div id="create-error" class="alert alert-error hidden"></div>
+          <div id="create-success" class="alert alert-success hidden"></div>
+
+          <form id="create-form">
+            <div class="field">
+              <label for="create-resident">住民 (Resident)</label>
+              <select id="create-resident" class="select" required></select>
+            </div>
+
+            <div class="field">
+              <label for="create-therapist">治疗师 (Therapist)</label>
+              <select id="create-therapist" class="select" required></select>
+            </div>
+
+            <div class="field">
+              <label for="create-start">开始时间</label>
+              <input id="create-start" type="datetime-local" class="input" required />
+            </div>
+
+            <div class="field">
+              <label>治疗时长</label>
+              <div class="duration-group" id="create-duration-group">
+                <button type="button" class="duration-btn" data-mins="30">30 分钟</button>
+                <button type="button" class="duration-btn active" data-mins="45">45 分钟</button>
+                <button type="button" class="duration-btn" data-mins="60">60 分钟</button>
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="create-notes">备注（选填）</label>
+              <textarea id="create-notes" class="textarea" rows="2" placeholder="例如：术后膝盖复健、需准备助行器"></textarea>
+            </div>
+
+            <button type="submit" id="create-submit" class="btn btn-primary btn-full">确认预约</button>
+          </form>
+        </section>
+
+        <!-- 并发抢订演示卡片 -->
+        <section class="card">
+          <div class="card-header">
+            <h2>并发抢订演示（深入项 ③）</h2>
+          </div>
+          <p class="subtitle">
+            模拟两位员工同时为不同住民抢订 <strong id="race-therapist-name">同一治疗师</strong>
+            的同一时段。后端通过 SQLite <code>BEGIN IMMEDIATE</code> 写锁串行化，确保严格只有 1 笔成功。
+          </p>
+
+          <div class="field">
+            <label for="race-slot">测试时段（30 分钟）</label>
+            <input id="race-slot" type="datetime-local" class="input" />
+          </div>
+
+          <button type="button" id="race-btn" class="btn btn-secondary btn-full">
+            同时发起 2 笔抢订请求
+          </button>
+
+          <div id="race-log" class="race-log hidden"></div>
+        </section>
+      </div>
+
+      <!-- 预约清单 -->
+      <section class="card">
+        <div class="card-header">
+          <h2>预约清单</h2>
+          <button type="button" id="refresh-btn" class="btn btn-secondary btn-sm">刷新清单</button>
+        </div>
+
+        <div class="filters">
+          <select id="filter-status" class="select" aria-label="按状态筛选">
+            <option value="ALL">全部状态</option>
+            <option value="SCHEDULED">仅看已排期</option>
+            <option value="CANCELLED">仅看已取消</option>
+          </select>
+
+          <select id="filter-therapist" class="select" aria-label="按治疗师筛选">
+            <option value="">全部治疗师</option>
+          </select>
+
+          <select id="filter-resident" class="select" aria-label="按住民筛选">
+            <option value="">全部住民</option>
+          </select>
+        </div>
+
+        <div id="list-error" class="alert alert-error hidden"></div>
+        <div id="apt-list" class="apt-list"></div>
+      </section>
+    </div>
+  </main>
+
+  <!-- 改期弹窗 -->
+  <div id="reschedule-backdrop" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal">
+      <div class="card-header">
+        <h2>预约改期</h2>
+        <span id="reschedule-version" class="badge badge-version">v1</span>
+      </div>
+      <p id="reschedule-subtitle" class="subtitle"></p>
+      <div id="reschedule-error" class="alert alert-error hidden"></div>
+
+      <form id="reschedule-form">
+        <div class="field">
+          <label for="reschedule-therapist">治疗师</label>
+          <select id="reschedule-therapist" class="select" required></select>
+        </div>
+
+        <div class="field">
+          <label for="reschedule-start">新的开始时间</label>
+          <input id="reschedule-start" type="datetime-local" class="input" required />
+        </div>
+
+        <div class="field">
+          <label>治疗时长</label>
+          <div class="duration-group" id="reschedule-duration-group">
+            <button type="button" class="duration-btn" data-mins="30">30 分钟</button>
+            <button type="button" class="duration-btn" data-mins="45">45 分钟</button>
+            <button type="button" class="duration-btn" data-mins="60">60 分钟</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="reschedule-notes">备注</label>
+          <textarea id="reschedule-notes" class="textarea" rows="2"></textarea>
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" id="reschedule-close" class="btn btn-secondary">关闭</button>
+          <button type="submit" id="reschedule-submit" class="btn btn-primary">保存改期</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
